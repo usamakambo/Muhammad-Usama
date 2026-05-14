@@ -71,13 +71,7 @@ export class ChatService {
     const usableBundles = await this.subscriptions.findUsableByUser(userId, now);
     const selected = usableBundles
       .filter((bundle) => bundle.remainingMessages > 0)
-      .sort((left, right) => {
-        const quotaDelta = right.remainingMessages - left.remainingMessages;
-        if (quotaDelta !== 0) {
-          return quotaDelta;
-        }
-        return right.renewalDate.getTime() - left.renewalDate.getTime();
-      })[0];
+      .sort(compareBundlesByRemainingQuota)[0];
 
     if (!selected) {
       throw new AppError(
@@ -93,3 +87,20 @@ export class ChatService {
     return selected;
   }
 }
+
+const compareBundlesByRemainingQuota = (
+  left: { remainingMessages: number; renewalDate: Date },
+  right: { remainingMessages: number; renewalDate: Date },
+): number => {
+  if (left.remainingMessages === right.remainingMessages) {
+    return right.renewalDate.getTime() - left.renewalDate.getTime();
+  }
+  if (right.remainingMessages === Number.POSITIVE_INFINITY) {
+    return 1;
+  }
+  if (left.remainingMessages === Number.POSITIVE_INFINITY) {
+    return -1;
+  }
+
+  return right.remainingMessages - left.remainingMessages;
+};

@@ -1,6 +1,35 @@
 # GGI Coding Task
 
-TypeScript REST API for an AI chat and subscription bundle system. The project uses Express for HTTP routing, Prisma for PostgreSQL access, and a DDD-style clean architecture so business rules stay separate from framework and database code.
+TypeScript REST API for an AI chat system with subscription bundle billing. The project uses Express, Prisma, and PostgreSQL with a Clean Architecture / DDD-style structure.
+
+## Requirement Coverage
+
+### AI Chat Module
+
+- Accepts a user question through `POST /chat/messages`.
+- Returns a mocked OpenAI response from `MockOpenAiService`.
+- Simulates OpenAI latency with `MOCK_OPENAI_DELAY_MS`.
+- Stores question, answer, token usage, charge source, and timestamp in PostgreSQL.
+- Tracks monthly free usage per user using `MonthlyFreeUsage`.
+- Gives each user `3` free messages per calendar month by default.
+- Resets free quota automatically because usage is stored by `YYYY-MM`.
+- Requires an active or cancelled-but-not-expired subscription bundle after free quota is used.
+- Supports Basic, Pro, and Enterprise bundle quotas.
+- Deducts paid chat usage from the bundle with the highest remaining quota.
+- Throws structured `QUOTA_EXCEEDED` errors when no free or bundle quota is available.
+
+### Subscription Bundle Module
+
+- Creates Basic, Pro, and Enterprise subscription bundles.
+- Supports monthly and yearly billing cycles.
+- Supports `autoRenew`.
+- Stores `maxMessages`, `priceCents`, `startDate`, `endDate`, and `renewalDate`.
+- Processes renewals through `POST /subscriptions/renewals/process`.
+- Simulates payment failure using configurable `PAYMENT_FAILURE_RATE`.
+- Marks failed renewals as `inactive`.
+- Supports cancellation through `PATCH /subscriptions/:id/cancel`.
+- Cancellation prevents renewal but keeps the bundle usable until the current `endDate`.
+- Usage history is preserved when a subscription is cancelled.
 
 ## Tech Stack
 
@@ -14,7 +43,7 @@ TypeScript REST API for an AI chat and subscription bundle system. The project u
 
 ## Architecture
 
-The project is organized by business module, then by layer.
+The project is organized by business module first, then by layer.
 
 ```text
 src/
@@ -22,84 +51,109 @@ src/
   index.ts
   chat/
     controllers/
+      ChatController.ts
     domain/
+      ChatMessage.ts
     repositories/
+      ChatMessageRepository.ts
+      MonthlyUsageRepository.ts
+      PrismaChatMessageRepository.ts
+      PrismaMonthlyUsageRepository.ts
     services/
+      ChatService.ts
+      MockOpenAiService.ts
   subscriptions/
     controllers/
+      SubscriptionController.ts
     domain/
+      SubscriptionBundle.ts
     repositories/
+      SubscriptionBundleRepository.ts
+      PrismaSubscriptionBundleRepository.ts
     services/
+      SubscriptionService.ts
   common/
     config.ts
     date.ts
     errors.ts
+    id.ts
     http/
     persistence/
 prisma/
   schema.prisma
+  migrations/
 ```
 
-### Layers
+### Layer Responsibilities
 
-- `domain`: Entity models and core business behavior.
-- `services`: Application use cases and orchestration.
-- `repositories`: Persistence interfaces and Prisma implementations.
-- `controllers`: Express route handlers and request/response mapping.
-- `common`: Shared config, errors, validation, HTTP middleware, and Prisma client setup.
+- `domain`: Business entities and business rules. Example: `SubscriptionBundle.consumeOne`, `cancel`, `renew`, and `markInactive`.
+- `services`: Application use cases. Example: `ChatService.ask` checks free usage, selects bundle quota, calls the mocked AI service, and saves the chat message.
+- `repositories`: Interfaces plus Prisma implementations. Services depend on repository contracts, not direct database queries.
+- `controllers`: Express request/response layer. Controllers validate HTTP input and map service results to JSON.
+- `common`: Shared configuration, date helpers, error types, validation, middleware, and Prisma client setup.
 
-The domain and services do not depend on Express. Controllers translate HTTP requests into service calls, and repositories hide database details behind interfaces.
+The domain layer does not depend on Express or Prisma. Database access is isolated inside Prisma repository implementations.
 
-## API Security
+## Database
 
-- All database access is performed through Prisma Client APIs, not interpolated raw SQL.
-- Request validation trims and bounds user-controlled strings before they reach services.
-- List endpoints support a bounded `limit` query parameter, defaulting to `50` and capped at `100`.
-- Express disables `X-Powered-By`, applies common hardening headers, and limits JSON request bodies to `32kb`.
-- Errors use a consistent JSON shape. Invalid JSON returns `VALIDATION_ERROR`; unexpected server errors are logged without leaking internals to clients.
+The database schema is defined in `prisma/schema.prisma`.
 
-## Modules
+Main tables:
 
-### AI Chat Module
+- `chat_messages`: Stores user questions, mocked answers, token counts, and whether the response used free or bundle quota.
+- `monthly_free_usage`: Stores monthly free usage per user using a composite key of `userId` and `usageMonth`.
+- `subscription_bundles`: Stores tier, billing cycle, status, renewal settings, quota, price, and billing dates.
 
-The chat module supports:
+Prisma migrations are kept in `prisma/migrations/` and should be committed to Git.
 
-- Accepting a user question.
-- Returning a mocked OpenAI response.
-- Simulating OpenAI response delay.
-- Estimating and storing prompt, completion, and total tokens.
-- Storing question and answer history.
-- Tracking monthly free usage per user.
-- Charging paid bundle quota after free usage is exhausted.
-- Returning structured `QUOTA_EXCEEDED` errors when no quota is available.
+## Security and Error Handling
 
-Free quota is tracked by `YYYY-MM`, so users automatically receive a fresh free quota when the month changes.
+- Prisma Client APIs are used for database access, so user input is parameterized instead of being interpolated into raw SQL.
+- No `$queryRaw` or `$executeRaw` calls are used.
+- User input is validated and trimmed before reaching services.
+- Request body size is limited to `32kb`.
+- List endpoints use a bounded `limit` query parameter, default `50`, max `100`.
+- Subscription IDs are validated as UUIDs before database lookup.
+- Express disables `X-Powered-By`.
+- Security headers are added through `securityHeaders`.
+- Invalid JSON returns a structured `VALIDATION_ERROR`.
+- Unexpected server errors return `INTERNAL_ERROR` without exposing internals to the client.
 
-### Subscription Bundle Module
+Error response format:
 
-The subscription module supports:
+```json
+{
+  "error": {
+    "code": "QUOTA_EXCEEDED",
+    "message": "Monthly free quota exceeded and no bundle is available",
+    "details": {
+      "freeMessagesPerMonth": 3
+    }
+  }
+}
+```
 
-- Creating Basic, Pro, and Enterprise bundles.
-- Monthly or yearly billing cycles.
-- Auto-renew toggle.
-- Cancellation at the end of the current billing cycle.
-- Preserving usage history after cancellation.
-- Simulated renewal processing.
-- Simulated payment failure through a configurable random failure rate.
+Common error codes:
 
-Bundle tiers:
+- `VALIDATION_ERROR`
+- `NOT_FOUND`
+- `QUOTA_EXCEEDED`
+- `PAYMENT_FAILED`
+- `INTERNAL_ERROR`
 
-| Tier       | Quota         |
-| ---------- | ------------- |
-| Basic      | 10 responses  |
-| Pro        | 100 responses |
-| Enterprise | Unlimited     |
+## Subscription Tiers
 
-When a user has multiple usable bundles, chat usage is deducted from the bundle with the latest remaining quota, meaning the bundle with the highest remaining allowance is consumed first. Enterprise is treated as unlimited.
+| Tier       | Max Responses | Monthly Price | Yearly Price |
+| ---------- | ------------- | ------------- | ------------ |
+| Basic      | 10            | 900 cents     | 9000 cents   |
+| Pro        | 100           | 2900 cents    | 29000 cents  |
+| Enterprise | Unlimited     | 19900 cents   | 199000 cents |
+
+Enterprise uses `maxMessages = null` in the database and is treated as unlimited in the domain entity.
 
 ## Environment Variables
 
-Create a `.env` file in the project root.
+Copy `.env.example` to `.env` and update values for your machine.
 
 ```env
 PORT=3000
@@ -109,27 +163,18 @@ MOCK_OPENAI_DELAY_MS=750
 PAYMENT_FAILURE_RATE=0.15
 ```
 
-Variable details:
-
 | Variable                  | Purpose                                     |
 | ------------------------- | ------------------------------------------- |
 | `PORT`                    | HTTP server port                            |
 | `DATABASE_URL`            | PostgreSQL connection string used by Prisma |
 | `FREE_MESSAGES_PER_MONTH` | Monthly free chat limit per user            |
-| `MOCK_OPENAI_DELAY_MS`    | Delay for mocked OpenAI response            |
-| `PAYMENT_FAILURE_RATE`    | Probability of renewal payment failure      |
+| `MOCK_OPENAI_DELAY_MS`    | Mocked OpenAI response delay in ms          |
+| `PAYMENT_FAILURE_RATE`    | Random renewal payment failure probability  |
 
 ## Installation
 
-Install dependencies:
-
 ```bash
 npm install
-```
-
-Generate Prisma Client:
-
-```bash
 npm run prisma:generate
 ```
 
@@ -137,23 +182,21 @@ npm run prisma:generate
 
 Make sure PostgreSQL is running and `DATABASE_URL` points to a valid database.
 
-For local development, push the Prisma schema directly:
-
-```bash
-npm run db:push
-```
-
-For migration-based development, run:
+For local development:
 
 ```bash
 npm run db:migrate
 ```
 
-`prisma/schema.prisma` is the source of truth for the database schema. `database/schema.sql` is only a SQL reference for the current model.
+For production-like deployment:
 
-## Running The Project
+```bash
+npx prisma migrate deploy
+```
 
-Build the TypeScript project:
+## Running the Project
+
+Build TypeScript:
 
 ```bash
 npm run build
@@ -165,24 +208,24 @@ Start the compiled API:
 npm start
 ```
 
-The server will run at:
+The API runs at:
 
 ```text
 http://localhost:3000
 ```
 
-or the port configured in `.env`.
+or whichever port is configured in `.env`.
 
 ## Scripts
 
 | Script                    | Description                                     |
 | ------------------------- | ----------------------------------------------- |
 | `npm run prisma:generate` | Generates Prisma Client                         |
-| `npm run db:push`         | Pushes Prisma schema to the database            |
-| `npm run db:migrate`      | Creates and applies Prisma migrations           |
+| `npm run db:push`         | Pushes Prisma schema directly to the database   |
+| `npm run db:migrate`      | Creates and applies Prisma migrations locally   |
 | `npm run build`           | Generates Prisma Client and compiles TypeScript |
 | `npm start`               | Runs `dist/index.js`                            |
-| `npm run lint`            | Runs ESLint                                     |
+| `npm run lint`            | Runs ESLint over TypeScript source files        |
 | `npm run format`          | Runs Prettier                                   |
 | `npm test`                | Runs the build as a basic verification step     |
 
@@ -194,6 +237,8 @@ or the port configured in `.env`.
 POST /chat/messages
 Content-Type: application/json
 ```
+
+Request:
 
 ```json
 {
@@ -207,7 +252,7 @@ Response:
 ```json
 {
   "data": {
-    "id": "...",
+    "id": "4ce5c34e-7b6a-4493-aed2-c6813bf8d0fe",
     "userId": "user-1",
     "question": "What is clean architecture?",
     "answer": "Mocked OpenAI response: What is clean architecture?",
@@ -217,7 +262,7 @@ Response:
       "totalTokens": 21
     },
     "chargedSource": "free",
-    "createdAt": "..."
+    "createdAt": "2026-05-14T10:00:00.000Z"
   }
 }
 ```
@@ -240,6 +285,8 @@ GET /usage/monthly?userId=user-1
 POST /subscriptions
 Content-Type: application/json
 ```
+
+Request:
 
 ```json
 {
@@ -273,7 +320,7 @@ GET /subscriptions?userId=user-1&limit=50
 PATCH /subscriptions/:id/cancel
 ```
 
-Cancellation disables auto-renew and marks the bundle as cancelled, but the bundle remains usable until its current `endDate`.
+Cancellation sets `autoRenew` to `false` and marks the bundle as `cancelled`. The subscription remains usable until the current `endDate`.
 
 ### Process Renewals
 
@@ -281,33 +328,9 @@ Cancellation disables auto-renew and marks the bundle as cancelled, but the bund
 POST /subscriptions/renewals/process
 ```
 
-This checks active auto-renew subscriptions whose `renewalDate` has passed. Successful renewals reset usage and extend the billing cycle. Failed payments mark the bundle inactive.
+This checks active auto-renew subscriptions whose `renewalDate` has passed.
 
-## Error Format
+- Successful renewal resets usage and extends the billing dates.
+- Failed simulated payment marks the subscription `inactive`.
 
-Errors are returned in a structured format:
-
-```json
-{
-  "error": {
-    "code": "QUOTA_EXCEEDED",
-    "message": "Monthly free quota exceeded and no bundle is available",
-    "details": {
-      "freeMessagesPerMonth": 3
-    }
-  }
-}
-```
-
-Common error codes:
-
-- `VALIDATION_ERROR`
-- `NOT_FOUND`
-- `QUOTA_EXCEEDED`
-- `PAYMENT_FAILED`
-- `INTERNAL_ERROR`
-
-## Notes
-
-- The OpenAI integration is intentionally mocked.
-- Users are represented by `userId` strings; there is no separate user module in this task.
+`src/` is the TypeScript source. `dist/` is generated JavaScript build output and can be recreated with `npm run build`.
