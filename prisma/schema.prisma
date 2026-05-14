@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SubscriptionTier {
+  basic
+  pro
+  enterprise
+
+  @@map("subscription_tier")
+}
+
+enum BillingCycle {
+  monthly
+  yearly
+
+  @@map("billing_cycle")
+}
+
+enum SubscriptionStatus {
+  active
+  cancelled
+  inactive
+
+  @@map("subscription_status")
+}
+
+enum ChargedSource {
+  free
+  bundle
+
+  @@map("charged_source")
+}
+
+model ChatMessage {
+  id               String        @id @db.Uuid
+  userId           String        @map("user_id")
+  question         String
+  answer           String
+  promptTokens     Int           @map("prompt_tokens")
+  completionTokens Int           @map("completion_tokens")
+  totalTokens      Int           @map("total_tokens")
+  chargedSource    ChargedSource @map("charged_source")
+  createdAt        DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([userId, createdAt(sort: Desc)], map: "idx_chat_messages_user_created")
+  @@map("chat_messages")
+}
+
+model MonthlyFreeUsage {
+  userId       String   @map("user_id")
+  usageMonth   String   @map("usage_month") @db.Char(7)
+  usedMessages Int      @default(0) @map("used_messages")
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@id([userId, usageMonth])
+  @@map("monthly_free_usage")
+}
+
+model SubscriptionBundle {
+  id           String             @id @db.Uuid
+  userId       String             @map("user_id")
+  tier         SubscriptionTier
+  billingCycle BillingCycle       @map("billing_cycle")
+  status       SubscriptionStatus @default(active)
+  autoRenew    Boolean            @default(true) @map("auto_renew")
+  maxMessages  Int?               @map("max_messages")
+  usedMessages Int                @default(0) @map("used_messages")
+  priceCents   Int                @map("price_cents")
+  startDate    DateTime           @map("start_date") @db.Timestamptz(6)
+  endDate      DateTime           @map("end_date") @db.Timestamptz(6)
+  renewalDate  DateTime           @map("renewal_date") @db.Timestamptz(6)
+  createdAt    DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime           @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@index([userId, status, endDate, renewalDate], map: "idx_subscription_bundles_user_status_dates")
+  @@map("subscription_bundles")
+}
